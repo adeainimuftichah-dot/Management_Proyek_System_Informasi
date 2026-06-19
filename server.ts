@@ -12,24 +12,32 @@ if (!fs.existsSync(UPLOAD_DIR)) {
   fs.mkdirSync(UPLOAD_DIR, { recursive: true });
 }
 
-// Database helper functions
+// Database helper functions using an in-memory cache for seamless Serverless/Vercel compatibility
+let memoryDb: AppDatabase | null = null;
+
 function readDb(): AppDatabase {
+  if (memoryDb) {
+    return memoryDb;
+  }
   try {
     if (fs.existsSync(DB_FILE)) {
       const data = fs.readFileSync(DB_FILE, "utf-8");
-      return JSON.parse(data);
+      memoryDb = JSON.parse(data);
+      return memoryDb!;
     }
   } catch (err) {
     console.error("Error reading database file, using fallback", err);
   }
-  return { users: [], mahasiswas: [], dosens: [], bimbingans: [], logbooks: [], systemLogs: [], emails: [] };
+  memoryDb = { users: [], mahasiswas: [], dosens: [], bimbingans: [], logbooks: [], systemLogs: [], emails: [] };
+  return memoryDb;
 }
 
 function writeDb(db: AppDatabase) {
+  memoryDb = db;
   try {
     fs.writeFileSync(DB_FILE, JSON.stringify(db, null, 2), "utf-8");
-  } catch (err) {
-    console.error("Error writing database file", err);
+  } catch (err: any) {
+    console.warn("Could not write database to file (expected on read-only environments like Vercel serverless):", err.message);
   }
 }
 
@@ -64,16 +72,14 @@ function sendSimulatedEmail(to: string, subject: string, body: string) {
   console.log(`======================================================\n`);
 }
 
-async function startServer() {
-  const app = express();
-  const PORT = 3000;
+const app = express();
 
-  // Support up to 15MB payloads for Base64 document uploads (validation occurs at endpoint)
-  app.use(express.json({ limit: "15mb" }));
-  app.use(express.urlencoded({ limit: "15mb", extended: true }));
+// Support up to 15MB payloads for Base64 document uploads (validation occurs at endpoint)
+app.use(express.json({ limit: "15mb" }));
+app.use(express.urlencoded({ limit: "15mb", extended: true }));
 
-  // Serve static uploaded files
-  app.use("/uploads", express.static(UPLOAD_DIR));
+// Serve static uploaded files
+app.use("/uploads", express.static(UPLOAD_DIR));
 
   // --- API ROUTING ---
 
@@ -696,28 +702,36 @@ async function startServer() {
 
   // --- INTERACTION & REVERSE PROXY MIDDLEWARES ---
 
-  // Vite development integration
-  if (process.env.NODE_ENV !== "production") {
-    console.log("Setting up Vite server middleware in development...");
-    const vite = await createViteServer({
-      server: { middlewareMode: true },
-      appType: "spa",
-    });
-    app.use(vite.middlewares);
-  } else {
-    console.log("Serving static production build from /dist...");
-    const distPath = path.join(process.cwd(), "dist");
-    app.use(express.static(distPath));
-    app.get("*", (req, res) => {
-      res.sendFile(path.join(distPath, "index.html"));
-    });
+  async function configureMiddlewaresAndListen() {
+    // Only configure Vite & local listen if not running on Vercel
+    if (!process.env.VERCEL) {
+      if (process.env.NODE_ENV !== "production") {
+        console.log("Setting up Vite server middleware in development...");
+        const vite = await createViteServer({
+          server: { middlewareMode: true },
+          appType: "spa",
+        });
+        app.use(vite.middlewares);
+      } else {
+        console.log("Serving static production build from /dist...");
+        const distPath = path.join(process.cwd(), "dist");
+        app.use(express.static(distPath));
+        app.get("*", (req, res) => {
+          res.sendFile(path.join(distPath, "index.html"));
+        });
+      }
+
+      const PORT = 3000;
+      app.listen(PORT, "0.0.0.0", () => {
+        console.log(`SiMon-S full-stack server running on http://localhost:${PORT}`);
+      });
+    } else {
+      console.log("Running in Vercel serverless environment. Skipping local Express listen.");
+    }
   }
 
-  app.listen(PORT, "0.0.0.0", () => {
-    console.log(`SiMon-S full-stack server running on http://localhost:${PORT}`);
+  configureMiddlewaresAndListen().catch((err) => {
+    console.error("Critical: Error starting server", err);
   });
-}
 
-startServer().catch((err) => {
-  console.error("Critical: Error starting server", err);
-});
+  export default app;

@@ -1,15 +1,23 @@
 import express from "express";
 import path from "path";
 import fs from "fs";
-import { createServer as createViteServer } from "vite";
 import { AppDatabase, User, Mahasiswa, Dosen, Bimbingan, Logbook, SystemLog, EmailNotification } from "./src/types";
+import { fileURLToPath } from "url";
+
+// ES modules support for __dirname
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
 // Ensure upload and DB directory exist
 const DB_FILE = path.join(process.cwd(), "db.json");
 const UPLOAD_DIR = path.join(process.cwd(), "uploads");
 
-if (!fs.existsSync(UPLOAD_DIR)) {
-  fs.mkdirSync(UPLOAD_DIR, { recursive: true });
+try {
+  if (!fs.existsSync(UPLOAD_DIR)) {
+    fs.mkdirSync(UPLOAD_DIR, { recursive: true });
+  }
+} catch (error: any) {
+  console.warn("Could not create uploads directory (expected in serverless/read-only environments):", error.message);
 }
 
 // Database helper functions using an in-memory cache for seamless Serverless/Vercel compatibility
@@ -19,15 +27,33 @@ function readDb(): AppDatabase {
   if (memoryDb) {
     return memoryDb;
   }
-  try {
-    if (fs.existsSync(DB_FILE)) {
-      const data = fs.readFileSync(DB_FILE, "utf-8");
-      memoryDb = JSON.parse(data);
-      return memoryDb!;
+
+  // Try multiple paths to guarantee loading db.json across different cloud and hosting providers
+  const pathsToTry = [
+    DB_FILE,
+    path.join(process.cwd(), "db.json"),
+    path.join(__dirname, "db.json"),
+    path.join(__dirname, "..", "db.json"),
+    path.join(__dirname, "../db.json"),
+    "db.json"
+  ];
+
+  for (const p of pathsToTry) {
+    try {
+      if (fs.existsSync(p)) {
+        console.log(`Successfully read database file at: ${p}`);
+        const data = fs.readFileSync(p, "utf-8");
+        if (data && data.trim()) {
+          memoryDb = JSON.parse(data);
+          return memoryDb!;
+        }
+      }
+    } catch (err: any) {
+      console.warn(`Could not read database at ${p}:`, err.message);
     }
-  } catch (err) {
-    console.error("Error reading database file, using fallback", err);
   }
+
+  console.warn("Using in-memory fallback database. Some default seed users may be missing.");
   memoryDb = { users: [], mahasiswas: [], dosens: [], bimbingans: [], logbooks: [], systemLogs: [], emails: [] };
   return memoryDb;
 }
@@ -707,6 +733,7 @@ app.use("/uploads", express.static(UPLOAD_DIR));
     if (!process.env.VERCEL) {
       if (process.env.NODE_ENV !== "production") {
         console.log("Setting up Vite server middleware in development...");
+        const { createServer: createViteServer } = await import("vite");
         const vite = await createViteServer({
           server: { middlewareMode: true },
           appType: "spa",
